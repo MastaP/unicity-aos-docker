@@ -159,7 +159,8 @@ Leave `TELEGRAM_BOT_TOKEN` empty and the uplink is not installed at all.
 With a token set, the capsule is installed and starts polling. Set
 `TELEGRAM_ALLOWED_USER_IDS` to your numeric Telegram id (ask
 [@userinfobot](https://t.me/userinfobot)) — **an empty allowlist lets any
-Telegram user drive your agent**, and the capsule warns about it on startup.
+Telegram user drive your agent**, and the container refuses to install the uplink unless you also set
+`TELEGRAM_ALLOW_ANY_USER=1`.
 
 All Telegram users share one AOS principal: the runtime derives a message's
 principal from the inbound connection, and an HTTP-polling uplink has none. The

@@ -46,7 +46,24 @@ services:
     # and confirm the host allows unprivileged userns
     # (sysctl kernel.unprivileged_userns_clone=1).
     healthcheck:
-      test: ["CMD", "astrid", "status"]
+      # Deliberately NOT `astrid status`. That command is a CLI socket client,
+      # and the kernel treats the last client disconnect as the end of a
+      # session: `connection_closed` -> `clear_session_allowances`, which drops
+      # every `session_only` approval for the principal. A healthcheck on a
+      # timer would therefore revoke the agent's "allow for this session" grants
+      # on every tick — and because an uplink capsule holds no client
+      # connection, the healthcheck is usually the ONLY connection, so it
+      # single-handedly starts and ends the principal's session each interval.
+      #
+      # Reading the daemon's own liveness markers opens no connection, and is a
+      # stronger check besides: it proves the process is alive and marked ready,
+      # not merely that something answered on a socket.
+      test:
+        - CMD-SHELL
+        - >-
+          h=$${ASTRID_HOME:-/home/aos/.astrid};
+          p=$$(head -1 "$$h/run/system.pid" 2>/dev/null);
+          [ -n "$$p" ] && [ -d "/proc/$$p" ] && [ -f "$$h/run/system.ready" ]
       interval: 30s
       timeout: 10s
       start_period: 90s

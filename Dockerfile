@@ -74,21 +74,19 @@ ARG ASTRID_SHA=a7c955ff5901d98059e8e6fba6f6b6e2033224e39c06db93e48a2ebe2a4f4725
 # and the Telegram Bot API.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl bubblewrap; \
+    apt-get install -y --no-install-recommends ca-certificates bubblewrap; \
     rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-    cd /tmp; \
-    curl --proto '=https' --tlsv1.2 -fsSL -o rt.tar.gz \
-      "https://github.com/astrid-runtime/astrid/releases/download/v${ASTRID_VERSION}/astrid-${ASTRID_VERSION}-x86_64-unknown-linux-gnu.tar.gz"; \
-    echo "${ASTRID_SHA}  rt.tar.gz" | sha256sum -c -; \
-    tar xzf rt.tar.gz; \
-    install -m0755 "astrid-${ASTRID_VERSION}-x86_64-unknown-linux-gnu"/astrid* /usr/local/bin/; \
-    rm -rf /tmp/*
+# Take the binaries from stage 1, which already downloaded and SHA-256 verified
+# them. Re-fetching here would download the same 48MB a second time and, worse,
+# would require `curl` in the final image — a ready-made fetch/exfil tool in a
+# container whose whole purpose is executing agent-authored capsules and
+# sandboxed host processes.
 
 # Run as a non-root user: the kernel writes its state under $HOME and normalises
 # private directories to owner-only access.
 RUN useradd --create-home --uid 1000 aos
+COPY --from=capsules /usr/local/bin/astrid /usr/local/bin/astrid-daemon /usr/local/bin/astrid-build /usr/local/bin/astrid-emit /usr/local/bin/
 COPY --from=capsules --chown=aos:aos /out /opt/aos-distro
 COPY --chown=aos:aos entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh

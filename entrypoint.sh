@@ -30,13 +30,19 @@ init_distro() {
   echo "==> Initialising Unicity AOS Community Edition..."
   # `source` paths in Distro.toml resolve relative to the working directory.
   cd "$DISTRO_DIR"
-  astrid init \
-    --distro Distro.toml \
-    --yes \
-    --allow-unsigned \
-    --var "openai_api_key=$OPENAI_API_KEY" \
-    --var "openai_base_url=$OPENAI_BASE_URL" \
-    --var "openai_model=$OPENAI_MODEL"
+  # The API key goes through ASTRID_VAR_OPENAI_API_KEY rather than `--var`:
+  # argv is world-readable via /proc/<pid>/cmdline, and this container runs
+  # agent-authored capsules and host processes that could read it. `astrid init`
+  # resolves a variable from --var, then ASTRID_VAR_<KEY>, then the default
+  # (see astrid-cli init.rs), so the two are interchangeable except for
+  # exposure. Non-secret values stay on the command line for legibility.
+  ASTRID_VAR_OPENAI_API_KEY="$OPENAI_API_KEY" \
+    astrid init \
+      --distro Distro.toml \
+      --yes \
+      --allow-unsigned \
+      --var "openai_base_url=$OPENAI_BASE_URL" \
+      --var "openai_model=$OPENAI_MODEL"
 
   cd "$HOME"
 }
@@ -50,9 +56,17 @@ ensure_telegram() {
     echo "==> No TELEGRAM_BOT_TOKEN set — skipping the Telegram uplink."
     return
   fi
-  if [[ -z "$TELEGRAM_ALLOWED_USER_IDS" ]]; then
-    echo "!! TELEGRAM_ALLOWED_USER_IDS is empty — ANY Telegram user will be" >&2
-    echo "!! able to drive this agent." >&2
+  # Fail closed. All Telegram users share one AOS principal, so the allowlist is
+  # the only isolation boundary; an empty one means any stranger who finds the
+  # bot can spend your provider credits and reach whatever tools the agent has.
+  # A warning is not enough here because `up -d` hides stderr.
+  if [[ -z "$TELEGRAM_ALLOWED_USER_IDS" && "${TELEGRAM_ALLOW_ANY_USER:-0}" != "1" ]]; then
+    echo "!! TELEGRAM_BOT_TOKEN is set but TELEGRAM_ALLOWED_USER_IDS is empty." >&2
+    echo "!! Refusing to install the uplink: an empty allowlist lets ANY Telegram" >&2
+    echo "!! user drive this agent. Set TELEGRAM_ALLOWED_USER_IDS (ask" >&2
+    echo "!! @userinfobot for your id), or set TELEGRAM_ALLOW_ANY_USER=1 if you" >&2
+    echo "!! genuinely want a public bot." >&2
+    return
   fi
   # Built from unicity-aos/capsule-telegram at image build time; the commit it
   # came from is recorded alongside it.
@@ -64,6 +78,17 @@ ensure_telegram() {
   ASTRID_VAR_ALLOWED_USER_IDS="$TELEGRAM_ALLOWED_USER_IDS" \
     astrid capsule install "$DISTRO_DIR/capsules/astrid-capsule-telegram.capsule" --yes
 }
+
+# A bind-mounted state directory that the container user cannot write is the
+# most common first-run failure: dockerd creates a missing host directory owned
+# by root, `astrid init` then fails, and `restart: unless-stopped` turns that
+# into a silent loop. Diagnose it once, clearly, instead.
+if [[ ! -w "$STATE" ]]; then
+  echo "!! $STATE is not writable by uid $(id -u)." >&2
+  echo "!! The state directory is bind-mounted from the host and must be owned" >&2
+  echo "!! by uid 1000:  mkdir -p data && chown 1000:1000 data && chmod 700 data" >&2
+  exit 1
+fi
 
 case "${1:-daemon}" in
   daemon)

@@ -1,0 +1,20 @@
+# The build context is uploaded to the Docker daemon in full. Nothing here is
+# COPYed today, but keeping secrets and state out of the context means a future
+# `COPY . .` cannot bake them into a layer.
+.env
+.env.*
+!.env.example
+data/
+data.*/
+data-*/
+aos-state/
+*.astrid
+*.astrid/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+.git
+.gitignore
+README.md
+LICENSE
