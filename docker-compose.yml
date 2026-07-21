@@ -1,0 +1,53 @@
+# Unicity AOS Community Edition — container runtime.
+#
+#   cp .env.example .env                 # then fill in the secrets
+#   mkdir -p data && chmod 700 data
+#   docker compose up -d --build
+#   docker compose exec aos astrid -p "hello"
+#
+# All credentials live in .env (gitignored) and are passed at runtime; nothing
+# secret is ever baked into the image.
+
+services:
+  aos:
+    build:
+      context: .
+      args:
+        # Pin to tags or commits for a reproducible image; `main` tracks tip.
+        AOS_CE_REF: ${AOS_CE_REF:-main}
+        TELEGRAM_REF: ${TELEGRAM_REF:-main}
+    image: aos-ce:2026.1.3
+    container_name: aos
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # ALL runtime state lives here: runtime keys, secrets, KV, sessions, the
+      # audit chain, installed capsules, and anything an agent builds with
+      # Forge.
+      #
+      # This is a BIND MOUNT to a directory on the host, deliberately not a
+      # named Docker volume. A named volume is invisible in the filesystem and
+      # is destroyed by `docker compose down -v` — which is an easy command to
+      # reach for, and takes every agent-authored capsule with it. A host
+      # directory survives `down -v`, can be backed up with cp/rsync/git, and
+      # can be inspected without a container.
+      #
+      # The container runs as uid/gid 1000; the host directory must be owned by
+      # the same uid:
+      #   mkdir -p data && chmod 700 data
+      # If your host user is not uid 1000, also: chown 1000:1000 data
+      - ${AOS_DATA_DIR:-./data}:/home/aos/.astrid
+    # The daemon writes owner-only state and needs no extra privileges. Capsules
+    # that spawn host processes (aos-shell) sandbox them with bubblewrap, which
+    # needs unprivileged user namespaces; if `aos-shell` tool calls fail with a
+    # sandbox error, add:
+    #   security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
+    # and confirm the host allows unprivileged userns
+    # (sysctl kernel.unprivileged_userns_clone=1).
+    healthcheck:
+      test: ["CMD", "astrid", "status"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3

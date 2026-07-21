@@ -1,0 +1,33 @@
+# ─── Credentials ────────────────────────────────────────────────────────────
+# Every .env variant, not just `.env` — `cp .env .env.bak` before rotating a
+# key is a normal reflex, and the copy holds the same live secrets.
+.env
+.env.*
+!.env.example
+
+# Compose auto-merges this file if present, which makes it the usual place to
+# hardcode `environment:` values inline — i.e. the API key and bot token.
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# ─── Runtime state ──────────────────────────────────────────────────────────
+# Holds runtime keys, secrets, KV, sessions, the audit chain, installed
+# capsules, and anything an agent builds. Never commit any of it.
+#
+# The default is ./data, but AOS_DATA_DIR can point anywhere; a *relative*
+# value lands inside the working tree, so the common alternatives are covered
+# too. If you set AOS_DATA_DIR to something else relative, add it here.
+data/
+data.*/
+data-*/
+aos-state/
+*.astrid/
+*.astrid
+
+# ─── Backups ────────────────────────────────────────────────────────────────
+# A tarball of the state directory contains the live provider key and bot
+# token, so match backup archives broadly rather than one exact filename.
+*.tar
+*.tar.gz
+*.tgz
+*.zip
