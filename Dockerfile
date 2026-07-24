@@ -57,14 +57,26 @@ RUN set -eux; \
 # cargo. Pin TELEGRAM_REF to a tag or commit for a reproducible image.
 ARG TELEGRAM_REPO=https://github.com/unicity-aos/capsule-telegram.git
 ARG TELEGRAM_REF=main
+# `git clone --branch` accepts only branch and tag names, so pinning
+# TELEGRAM_REF to a commit SHA — which this image documents as supported —
+# would fail. Fetching the ref explicitly handles branches, tags AND SHAs.
+#
+# Note that with a moving ref like `main`, Docker caches this layer on the ARG
+# value, so a rebuild will happily reuse a stale clone. Pin TELEGRAM_REF to a
+# tag or commit for a reproducible image, or pass --no-cache to re-resolve.
 RUN set -eux; \
-    git clone --depth 1 --branch "${TELEGRAM_REF}" "${TELEGRAM_REPO}" /src/capsule-telegram; \
-    git -C /src/capsule-telegram rev-parse HEAD > /out/telegram-commit.txt; \
+    mkdir -p /src/capsule-telegram; \
+    cd /src/capsule-telegram; \
+    git init -q .; \
+    git remote add origin "${TELEGRAM_REPO}"; \
+    git fetch -q --depth 1 origin "${TELEGRAM_REF}"; \
+    git checkout -q FETCH_HEAD; \
+    git rev-parse HEAD > /out/telegram-commit.txt; \
     astrid-build /src/capsule-telegram --output /out/capsules; \
     test -f /out/capsules/astrid-capsule-telegram.capsule
 
-# ─── Stage 2: runtime ───────────────────────────────────────────────────────
-FROM debian:trixie-slim
+# ─── Stage 2: runtime (slim, production default) ─────────────────────────────
+FROM debian:trixie-slim AS runtime
 
 ARG ASTRID_VERSION=0.10.4
 ARG ASTRID_SHA=a7c955ff5901d98059e8e6fba6f6b6e2033224e39c06db93e48a2ebe2a4f4725
@@ -104,3 +116,81 @@ VOLUME ["/home/aos/.astrid"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["daemon"]
+
+# ─── Stage 3: devtools (runtime + Rust toolchain) ────────────────────────────
+# The slim `runtime` above cannot build a capsule: it has `astrid-build` but no
+# compiler, which is why an agent that scaffolds a capsule with Forge cannot
+# then build and install it from inside the container. This target adds the
+# toolchain so `astrid capsule build` works in-container:
+#
+#   docker compose exec aos astrid capsule build <path> --output <dir>
+#   docker compose exec aos astrid capsule install <dir>/<name>.capsule
+#
+# It is NOT the default. A compiler in a container that also executes
+# agent-authored capsule code is extra attack surface, so production keeps the
+# slim `runtime` target and opt into this one deliberately:
+#   AOS_IMAGE_TARGET=devtools docker compose up -d --build
+#
+# The toolchain is copied from the stage-1 builder (rust:1.95-trixie), which
+# already has rustup, cargo, and the wasm32-unknown-unknown target — no second
+# download. `gcc` is genuinely required even for a wasm-only build: proc-macro
+# crates (serde_derive, …) are compiled for the HOST and need a host linker.
+FROM runtime AS devtools
+
+USER root
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc libc6-dev; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=capsules /usr/local/rustup /usr/local/rustup
+COPY --from=capsules /usr/local/cargo /usr/local/cargo
+
+# World-readable so uid 1000 can use the shared toolchain; CARGO_HOME stays
+# writable for the per-build registry/target cache.
+RUN set -eux; \
+    chmod -R a+rX /usr/local/rustup; \
+    chmod -R a+rwX /usr/local/cargo; \
+    rustc --version; \
+    cargo --version; \
+    rustup target list --installed | grep -q wasm32-unknown-unknown
+
+# aos-shell runs the agent's commands inside a bwrap sandbox that STRIPS the
+# environment — no RUSTUP_HOME, CARGO_HOME, or HOME — so the rustup proxy
+# binaries in /usr/local/cargo/bin cannot locate a toolchain ("no default set")
+# and would even fetch one over the network on first use. Symlink the *real*
+# toolchain binaries onto /usr/local/bin (which is on the sandbox PATH): the
+# real cargo finds rustc via its own resolved location, needing no environment
+# at all. `env -i` below reproduces the sandbox's empty environment exactly, so
+# a green build proves the agent can compile capsules through aos-shell.
+# The binaries in /usr/local/cargo/bin are rustup PROXIES (symlinks to `rustup`)
+# that resolve a toolchain via RUSTUP_HOME. In the normal container that env is
+# set, so they work; inside the bwrap sandbox it is stripped, so they fail. That
+# directory is also ahead of /usr/local/bin on the resolved PATH, so it is the
+# one that actually runs. Overwrite the proxies (in BOTH bin dirs) with the real
+# toolchain binaries, which locate rustc/std from their own resolved path and
+# need no environment. `rustup` itself is left intact for interactive use.
+#
+# One consequence: bypassing the proxies also bypasses per-project
+# rust-toolchain.toml selection — every build uses this pinned toolchain. That
+# is fine for capsules pinning <= this version; a capsule pinning a newer
+# toolchain would need it installed and the pin bumped here.
+ARG RUST_TOOLCHAIN_DIR=/usr/local/rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin
+RUN set -eux; \
+    for b in cargo rustc rustdoc rustfmt cargo-clippy clippy-driver cargo-fmt; do \
+      ln -sf "${RUST_TOOLCHAIN_DIR}/${b}" "/usr/local/bin/${b}"; \
+      ln -sf "${RUST_TOOLCHAIN_DIR}/${b}" "/usr/local/cargo/bin/${b}"; \
+    done; \
+    # Reproduce the bwrap sandbox: empty environment, only a PATH. If a proxy
+    # still shadowed the real binary, this would fail the build rather than
+    # surface at runtime.
+    env -i PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin cargo --version; \
+    env -i PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin rustc --version; \
+    env -i PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+      rustc --print target-list | grep -qx wasm32-unknown-unknown
+
+USER aos

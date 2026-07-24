@@ -12,11 +12,16 @@ services:
   aos:
     build:
       context: .
+      # `runtime` is the slim production image (no compiler). Set
+      # AOS_IMAGE_TARGET=devtools to get a toolchain in the container so
+      # `astrid capsule build` works in-place — see the Dockerfile stage 3.
+      target: ${AOS_IMAGE_TARGET:-runtime}
       args:
         # Pin to tags or commits for a reproducible image; `main` tracks tip.
         AOS_CE_REF: ${AOS_CE_REF:-main}
         TELEGRAM_REF: ${TELEGRAM_REF:-main}
-    image: aos-ce:2026.1.3
+    # Tag by target so the slim and devtools images don't overwrite each other.
+    image: aos-ce:2026.1.3-${AOS_IMAGE_TARGET:-runtime}
     container_name: aos
     restart: unless-stopped
     env_file:
@@ -38,13 +43,24 @@ services:
       #   mkdir -p data && chmod 700 data
       # If your host user is not uid 1000, also: chown 1000:1000 data
       - ${AOS_DATA_DIR:-./data}:/home/aos/.astrid
-    # The daemon writes owner-only state and needs no extra privileges. Capsules
-    # that spawn host processes (aos-shell) sandbox them with bubblewrap, which
-    # needs unprivileged user namespaces; if `aos-shell` tool calls fail with a
-    # sandbox error, add:
-    #   security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
-    # and confirm the host allows unprivileged userns
-    # (sysctl kernel.unprivileged_userns_clone=1).
+    # NOTE: aos-shell sandboxes the processes it spawns with bubblewrap, which
+    # needs nested unprivileged user namespaces that Docker's default seccomp +
+    # AppArmor profiles block. This container runs CONFINED (no relaxations), so
+    # aos-shell tool calls fail with a namespace error — the agent cannot run
+    # host shell commands here. That is the deliberate, safe default.
+    #
+    # Building capsules inside the container does NOT need aos-shell: use the
+    # operator path, which runs in the container's normal namespace:
+    #   docker compose exec aos astrid capsule build <path> --output <dir>
+    #   docker compose exec aos astrid capsule install <dir>/<name>.capsule
+    #
+    # Enabling agent-run shell commands would require adding, at minimum:
+    #   security_opt: [seccomp=unconfined, apparmor=unconfined, systempaths=unconfined]
+    #   cap_add: [SYS_ADMIN]
+    # which removes most of Docker's isolation. Even then, agent-autonomous
+    # *builds* do not work: aos-shell executes each command in a fresh, ephemeral
+    # sandbox with no filesystem persistence between calls, so a multi-step build
+    # cannot share state. Left commented on purpose.
     healthcheck:
       # Deliberately NOT `astrid status`. That command is a CLI socket client,
       # and the kernel treats the last client disconnect as the end of a

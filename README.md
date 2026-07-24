@@ -94,6 +94,7 @@ Environment-only. See `.env.example`.
 | `AOS_DATA_DIR` | host path for state (default `./data`) |
 | `AOS_CE_REF` | git ref of `unicity-aos/aos-ce` to build (default `main`) |
 | `TELEGRAM_REF` | git ref of `unicity-aos/capsule-telegram` (default `main`) |
+| `AOS_IMAGE_TARGET` | `runtime` (slim, default) or `devtools` (adds the Rust toolchain) — see [Building capsules](#building-capsules) |
 
 Any OpenAI-compatible provider works. The base URL must omit `/v1` — the
 provider capsule appends `/v1/models` and `/v1/chat/completions` itself:
@@ -117,23 +118,63 @@ AOS_CE_REF=v2026.1.3
 TELEGRAM_REF=2a99687ce1abe4d5031d15ecabb810505b3f5bfb
 ```
 
-The resolved commits of both sources are recorded in the image
-(`/opt/aos-distro/aos-ce-commit.txt` and `telegram-commit.txt`), and the Telegram
-one is echoed at startup, so a running container can always tell you what it
-shipped.
+The refs are resolved with `git fetch`, so all three of a branch name, a tag,
+and a full commit SHA work. The resolved commits of both sources are recorded in
+the image (`/opt/aos-distro/aos-ce-commit.txt` and `telegram-commit.txt`), and
+the Telegram one is echoed at startup, so a running container can always tell
+you what it shipped. (With a moving ref like `main`, Docker caches the clone
+layer — pass `--no-cache` or pin a tag/SHA when you want a guaranteed re-fetch.)
+
+## Building capsules
+
+The default `runtime` image has no compiler, so it cannot build a capsule. To
+build one *inside the container*, use the `devtools` target, which adds the Rust
+toolchain (`AOS_IMAGE_TARGET=devtools` in `.env`, then `up -d --build`):
+
+```bash
+docker compose exec aos astrid capsule build /path/to/capsule --output ./dist
+docker compose exec aos astrid capsule install ./dist/<name>.capsule
+docker compose exec aos astrid capsule list
+```
+
+This is the **operator** path: it runs in the container's normal namespace and
+needs no extra privileges.
+
+**What does not work: the agent building a capsule on its own.** An agent can
+scaffold a capsule with Forge, but it cannot then build it from inside the
+container. Two reasons, both by design:
+
+- `aos-shell` (the agent's shell) is blocked in a default container: its
+  bubblewrap sandbox needs nested unprivileged user namespaces that Docker's
+  default seccomp/AppArmor profiles forbid. Relaxing that removes most of the
+  container's isolation and is left off on purpose.
+- Even with the shell enabled, `aos-shell` runs **each** command in a fresh,
+  ephemeral sandbox with no filesystem shared between calls — so a multi-step
+  build (write sources, then compile, then read the artifact) cannot carry state
+  across steps.
+
+So: build with the operator commands above, then let the agent use the installed
+capsule. Full agent-autonomous builds would require changes in AOS itself (a
+persistent build workspace bound into the shell sandbox, or a dedicated build
+capsule), not in this image.
+
+The `devtools` image is ~3.4 GB versus ~330 MB for `runtime`; keep the default
+`runtime` unless you are building capsules.
 
 ## How the image is built
 
-Two stages.
-
 **Stage 1** (`rust:1.95-trixie`) downloads the signed Astrid release, verifies
-its SHA-256, then clones `aos-ce` and builds every capsule named in
-`release/community-capsules.txt`. It then clones `capsule-telegram` and builds
+its SHA-256, then fetches `aos-ce` and builds every capsule named in
+`release/community-capsules.txt`. It then fetches `capsule-telegram` and builds
 that separately — the Telegram uplink is not part of the CE distro, so it comes
 from its own repository.
 
-**Stage 2** (`debian:trixie-slim`) carries only the kernel binaries, the distro
-manifest, and the packaged `.capsule` files. No Rust, no git.
+**Stage 2 — `runtime`** (`debian:trixie-slim`) carries only the kernel binaries,
+the distro manifest, and the packaged `.capsule` files. No Rust, no git. This is
+the production default.
+
+**Stage 3 — `devtools`** layers the Rust toolchain (copied from stage 1, no
+second download) onto `runtime`, selected by `AOS_IMAGE_TARGET=devtools`.
 
 ## Operating
 
